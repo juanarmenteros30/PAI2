@@ -1,0 +1,14 @@
+{
+    "pdi_user": {
+        "password": "pdi_password123",
+        "role": "PDI"
+    },
+    "pas_user": {
+        "password": "pas_password123",
+        "role": "PAS"
+    },
+    "inv_user": {
+        "password": "inv_password123",
+        "role": "Investigadores"
+    }
+}
