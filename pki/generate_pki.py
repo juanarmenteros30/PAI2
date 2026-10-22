@@ -36,9 +36,9 @@ def generate_ca(output_dir):
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.datetime.utcnow()
+        datetime.datetime.now(datetime.timezone.utc)
     ).not_valid_after(
-        datetime.datetime.utcnow() + datetime.timedelta(days=3650)
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=None), critical=True,
     ).add_extension(
@@ -93,9 +93,9 @@ def generate_cert(output_dir, name, ca_key, ca_cert, is_server=False):
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.datetime.utcnow()
+        datetime.datetime.now(datetime.timezone.utc)
     ).not_valid_after(
-        datetime.datetime.utcnow() + datetime.timedelta(days=365)
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
     ).add_extension(
         ski, critical=False
     ).add_extension(

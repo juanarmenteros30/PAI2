@@ -10,7 +10,7 @@ Este proyecto implementa una infraestructura de red segura (VPN a nivel de aplic
 
 ## Requisitos Previos
 
-Necesitas Python 3.8+ instalado en tu sistema.
+Necesitas Python 3.10+ instalado en tu sistema.
 
 1. Instala las dependencias necesarias:
    ```bash
@@ -98,7 +98,7 @@ Podrás comparar el tiempo total de ejecución y evaluar el sobrecoste (overhead
 ## Paso 7 (Extra +10%): Simulación de Ataque Interceptador (MITM)
 El proyecto incluye un script para demostrar empíricamente cómo la arquitectura VPN TLS resiste intentos de lectura de tráfico.
 1. Ejecuta el sniffer: `python extra_mitm.py`
-2. En el cliente, cambia temporalmente el puerto a `8444` (modificando `PORT = 8444` en `client.py` o `gui_portal.py`) y conéctate.
+2. En el cliente conéctate por el MITM: `python client/client.py -u pdi_user -p pdi_password123 --port 8444`.
 3. Observa en la consola del MITM cómo los paquetes viajan cifrados e ilegibles, y cómo no puede descifrar las credenciales de la capa de aplicación.
 
 ## Paso 8: Generación del Entregable `PAI2-STX.zip`
@@ -106,3 +106,23 @@ El proyecto incluye un script para demostrar empíricamente cómo la arquitectur
 2. Añade los ficheros `.pcap` de las capturas de red y el archivo `audit.log`.
 3. Comprime todo el directorio (Código fuente + PKI + Logs + Documentación).
 4. Súbelo a Blackboard antes de la fecha límite (27 de octubre).
+
+### Extra: suplantación del servidor
+`python extra_rogue_server.py` levanta un servidor impostor (puerto 8445) con un certificado emitido por **otra** CA.
+`python client/client.py -u pdi_user -p pdi_password123 --port 8445` debe fallar con `CERTIFICATE_VERIFY_FAILED`.
+
+## Pruebas automáticas
+```bash
+python -m unittest discover -s tests -v
+```
+Arrancan el servidor, y comprueban: login legítimo, certificado de otro usuario (suplantación), cliente sin certificado,
+servidor con CA falsa, TLS 1.2 rechazado, cliente colgado sin bloquear el servidor, bloqueo por intentos fallidos y
+entradas en `audit.log`.
+
+## Cambios de seguridad añadidos
+* El CN del certificado de cliente debe coincidir con el usuario que hace login.
+* Handshake mTLS en el hilo del cliente y con timeouts; los rechazos se registran en `audit.log`.
+* Solo se aceptan `TLS_AES_256_GCM_SHA384` y `TLS_CHACHA20_POLY1305_SHA256`.
+* Bloqueo temporal tras 5 intentos fallidos; saneado de logs.
+* Contraseñas con PBKDF2-HMAC-SHA256 (200.000 iteraciones) + sal. Si vienes de la versión anterior: borra `users.db`,
+  renombra `users.json.migrated` a `users.json` y ejecuta `python server/migrate_users.py`.

@@ -1,1 +1,2 @@
 cryptography
+psutil>=5.9   # opcional: mide CPU/RAM del servidor en los benchmarks

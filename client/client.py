@@ -11,7 +11,7 @@ PORT = 8443
 CERTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'pki', 'certs')
 CA_CERT = os.path.join(CERTS_DIR, 'ca-cert.pem')
 
-def start_client(username, password):
+def start_client(username, password, port=PORT):
     client_cert = os.path.join(CERTS_DIR, f"{username}-cert.pem")
     client_key = os.path.join(CERTS_DIR, f"{username}-key.pem")
     
@@ -30,15 +30,16 @@ def start_client(username, password):
     # Cargar certificado y clave del cliente para autenticación mutua (mTLS)
     context.load_cert_chain(certfile=client_cert, keyfile=client_key)
     
+    secure_sock = None
     # Crear socket de red
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     
-    print(f"[*] Conectando a {HOST}:{PORT}...")
+    print(f"[*] Conectando a {HOST}:{port}...")
     
     try:
         # Establecer túnel TLS seguro
         secure_sock = context.wrap_socket(client_socket, server_hostname=HOST)
-        secure_sock.connect((HOST, PORT))
+        secure_sock.connect((HOST, port))
         
         print(f"[*] Handshake mTLS exitoso. Cifrado: {secure_sock.cipher()}")
         
@@ -78,12 +79,20 @@ def start_client(username, password):
         print(f"[!] Error de conexión: {e}")
     finally:
         print("[*] Desmontando el túnel seguro y cerrando conexión.")
-        client_socket.close()
+        if secure_sock:
+            try:
+                secure_sock.unwrap()      # close_notify: cierre TLS ordenado
+            except Exception:
+                pass
+            secure_sock.close()
+        else:
+            client_socket.close()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Cliente VPN BYODSEC (TLS 1.3 + mTLS)")
     parser.add_argument("-u", "--user", required=True, help="Nombre de usuario (ej. pdi_user)")
     parser.add_argument("-p", "--password", required=True, help="Contraseña del usuario")
+    parser.add_argument("--port", type=int, default=PORT, help="Puerto del servidor (def. 8443)")
     args = parser.parse_args()
     
-    start_client(args.user, args.password)
+    start_client(args.user, args.password, args.port)

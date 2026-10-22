@@ -1,12 +1,13 @@
 import socket
 import threading
 import sys
+import argparse
 
 # Configuración del proxy MITM
 LISTEN_HOST = '127.0.0.1'
-LISTEN_PORT = 8444  # El cliente se conectará aquí
+LISTEN_PORT = 8444  # El cliente se conectará aquí (--listen)
 TARGET_HOST = '127.0.0.1'
-TARGET_PORT = 8443  # Servidor real
+TARGET_PORT = 8443  # Servidor real (--target)
 
 def hex_dump(data):
     return ' '.join(f'{b:02x}' for b in data)
@@ -24,11 +25,11 @@ def forward(source, destination, direction):
             try:
                 text = data.decode('utf-8')
                 print(f"Texto Claro: {text}")
-            except:
+            except UnicodeDecodeError:
                 print("Texto Claro: [ILEGIBLE / CIFRADO]")
                 
             destination.sendall(data)
-    except Exception as e:
+    except Exception:
         pass
     finally:
         source.close()
@@ -62,4 +63,9 @@ def start_mitm():
         mitm_socket.close()
 
 if __name__ == '__main__':
+    ap = argparse.ArgumentParser(description="Proxy MITM pasivo (demostración)")
+    ap.add_argument("--listen", type=int, default=LISTEN_PORT)
+    ap.add_argument("--target", type=int, default=TARGET_PORT)
+    a = ap.parse_args()
+    LISTEN_PORT, TARGET_PORT = a.listen, a.target
     start_mitm()

@@ -35,12 +35,10 @@ class VPNPortal(tk.Tk):
         tk.Label(self.login_frame, text="Usuario Corporativo:", bg="#f0f0f0", font=("Helvetica", 10)).pack(anchor="w")
         self.user_entry = tk.Entry(self.login_frame, font=("Helvetica", 12))
         self.user_entry.pack(fill=tk.X, pady=5)
-        self.user_entry.insert(0, "pdi_user")
         
         tk.Label(self.login_frame, text="Contraseña:", bg="#f0f0f0", font=("Helvetica", 10)).pack(anchor="w")
         self.pass_entry = tk.Entry(self.login_frame, font=("Helvetica", 12), show="*")
         self.pass_entry.pack(fill=tk.X, pady=5)
-        self.pass_entry.insert(0, "pdi_password123")
         
         self.connect_btn = tk.Button(self.login_frame, text="Iniciar Sesión Segura (mTLS)", font=("Helvetica", 12, "bold"), bg="#004aad", fg="white", command=self.connect_vpn)
         self.connect_btn.pack(fill=tk.X, pady=15)
@@ -67,6 +65,10 @@ class VPNPortal(tk.Tk):
         self.send_btn.pack(side=tk.RIGHT)
         
     def log(self, message):
+        # Seguro para hilos: Tk solo se toca desde el hilo principal
+        self.after(0, self._log, message)
+
+    def _log(self, message):
         self.log_area.config(state=tk.NORMAL)
         self.log_area.insert(tk.END, message + "\n")
         self.log_area.see(tk.END)
@@ -151,15 +153,28 @@ class VPNPortal(tk.Tk):
         self.secure_sock = None
         
     def disconnect_vpn(self):
-        self.log("\n[*] Desmontando el túnel seguro y cerrando sesión...")
-        if self.secure_sock:
+        if not self.secure_sock:
+            self._update_ui_disconnected()
+            return
+        self.log("[*] Desmontando el túnel seguro y cerrando sesión...")
+        self.connect_btn.config(state=tk.DISABLED)
+        try:
+            # El servidor responde y cierra; el hilo receptor detecta el EOF y termina el cierre
+            self.secure_sock.sendall(b"LOGOUT")
+            self.after(3000, self._finish_disconnect)      # salvaguarda
+        except Exception:
+            self._finish_disconnect()
+
+    def _finish_disconnect(self):
+        sock, self.secure_sock = self.secure_sock, None
+        self.connected = False
+        if sock:
             try:
-                self.secure_sock.sendall(b"LOGOUT")
-                self.secure_sock.close()
-            except:
+                sock.close()
+            except Exception:
                 pass
         self._update_ui_disconnected()
-        
+
     def _receive_thread(self):
         try:
             while self.connected:
@@ -167,11 +182,11 @@ class VPNPortal(tk.Tk):
                 if not data:
                     break
                 self.log(f"[SERVER] {data.decode('utf-8').strip()}")
-        except:
+        except Exception:
             pass
         finally:
             if self.connected:
-                self.after(0, self.disconnect_vpn)
+                self.after(0, self._finish_disconnect)
                 
     def send_message(self):
         if not self.connected: return

@@ -2,16 +2,15 @@ import socket
 import threading
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(__file__))
+from db import init_db, verify_user
 
 HOST = '0.0.0.0'
 PORT = 8080
-USERS_FILE = os.path.join(os.path.dirname(__file__), 'users.json')
 
-def load_users():
-    with open(USERS_FILE, 'r') as f:
-        return json.load(f)
-
-def handle_client(conn, addr, users):
+def handle_client(conn, addr):
     try:
         auth_data = conn.recv(1024).decode('utf-8')
         if not auth_data: return
@@ -20,11 +19,11 @@ def handle_client(conn, addr, users):
             credentials = json.loads(auth_data)
             username = credentials.get('username')
             password = credentials.get('password')
-        except:
+        except Exception:
             conn.sendall(b"ERROR\n")
             return
             
-        if username in users and users[username]['password'] == password:
+        if verify_user(username, password):
             conn.sendall(b"OK\n")
             while True:
                 data = conn.recv(4096)
@@ -41,7 +40,7 @@ def handle_client(conn, addr, users):
         conn.close()
 
 def start_server():
-    users = load_users()
+    init_db()
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
@@ -51,7 +50,7 @@ def start_server():
     try:
         while True:
             client_sock, addr = server_socket.accept()
-            t = threading.Thread(target=handle_client, args=(client_sock, addr, users))
+            t = threading.Thread(target=handle_client, args=(client_sock, addr))
             t.daemon = True
             t.start()
     except KeyboardInterrupt:

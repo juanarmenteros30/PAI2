@@ -1,9 +1,9 @@
 """
-db.py — Gestión de la base de datos de usuarios (SQLite + HMAC-SHA256 + Salt)
+db.py — Gestión de la base de datos de usuarios (SQLite + PBKDF2-HMAC-SHA256 + Salt)
 
 Esquema de seguridad:
   - Cada usuario tiene un salt aleatorio de 32 bytes (os.urandom).
-  - La contraseña se almacena como HMAC-SHA256(salt || password) en hex.
+  - La contraseña se almacena como PBKDF2-HMAC-SHA256 (salt, 200.000 iteraciones) en hex.
   - Nunca se guarda la contraseña en claro.
 """
 
@@ -11,6 +11,8 @@ import sqlite3
 import hmac
 import hashlib
 import os
+
+KDF_ITERATIONS = 200_000
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'users.db')
 
@@ -38,10 +40,8 @@ def init_db() -> None:
 
 def _compute_hmac(salt_hex: str, password: str) -> str:
     """
-    Calcula HMAC-SHA256 usando el salt (en hex) y la contraseña.
-
-    La clave del HMAC es el salt en bytes, y el mensaje es la contraseña
-    codificada en UTF-8.  Se usa SHA-256 como función de hash.
+    Deriva la clave de la contraseña con PBKDF2-HMAC-SHA256 (KDF lento) usando
+    el salt (en hex) y KDF_ITERATIONS iteraciones.
 
     Parámetros
     ----------
@@ -55,8 +55,9 @@ def _compute_hmac(salt_hex: str, password: str) -> str:
     str
         Digest HMAC-SHA256 en formato hexadecimal.
     """
-    salt_bytes = bytes.fromhex(salt_hex)
-    return hmac.new(salt_bytes, password.encode('utf-8'), hashlib.sha256).hexdigest()
+    return hashlib.pbkdf2_hmac(
+        'sha256', password.encode('utf-8'), bytes.fromhex(salt_hex), KDF_ITERATIONS
+    ).hex()
 
 
 def add_user(username: str, password: str, role: str) -> None:
@@ -136,3 +137,10 @@ def user_exists(username: str) -> bool:
             "SELECT 1 FROM users WHERE username = ?", (username,)
         ).fetchone()
     return row is not None
+
+
+def delete_user(username: str) -> None:
+    """Elimina un usuario (rollback del registro si falla la emisión del certificado)."""
+    with _get_connection() as conn:
+        conn.execute("DELETE FROM users WHERE username = ?", (username,))
+        conn.commit()

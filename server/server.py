@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import logging
+import re
+import time
 
 # Añadir directorio padre al path para importar db
 sys.path.insert(0, os.path.dirname(__file__))
@@ -19,6 +21,31 @@ SERVER_KEY = os.path.join(CERTS_DIR, 'server-key.pem')
 CA_CERT = os.path.join(CERTS_DIR, 'ca-cert.pem')
 AUDIT_LOG = os.path.join(os.path.dirname(__file__), 'audit.log')
 
+HANDSHAKE_TIMEOUT = 10      # s para completar el handshake mTLS
+IDLE_TIMEOUT = 300          # s de inactividad en sesión
+ALLOWED_CIPHERS = {"TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"}
+MAX_FAILS, LOCK_SECONDS = 5, 60
+_fails = {}                 # (ip, usuario) -> (nº fallos, instante primer fallo)
+_fails_lock = threading.Lock()
+
+def clean(value):
+    """Evita log injection (saltos de línea) y limita longitud."""
+    return re.sub(r'[\r\n\t]', '_', str(value))[:64]
+
+def is_locked(key):
+    with _fails_lock:
+        n, t0 = _fails.get(key, (0, 0))
+        if n >= MAX_FAILS and time.time() - t0 < LOCK_SECONDS:
+            return True
+        if n >= MAX_FAILS:
+            _fails.pop(key, None)
+        return False
+
+def register_fail(key):
+    with _fails_lock:
+        n, t0 = _fails.get(key, (0, time.time()))
+        _fails[key] = (n + 1, t0)
+
 # Configuración de Auditoría (RS4)
 logging.basicConfig(
     filename=AUDIT_LOG,
@@ -26,83 +53,99 @@ logging.basicConfig(
     format='%(asctime)s - AUDIT - %(levelname)s - %(message)s'
 )
 
-def handle_client(conn, addr):
-    # Registrar cipher suite TLS negociada (Cypher Suite)
-    cipher_name, tls_version, key_bits = conn.cipher()
-    logging.info(
-        f"Conexión TLS establecida desde {addr[0]}:{addr[1]} | "
-        f"Cipher: {cipher_name} | Versión: {tls_version} | Bits: {key_bits}"
-    )
-    print(f"[*] Cipher suite negociada: {cipher_name} ({tls_version}, {key_bits} bits)")
+def handle_client(raw_conn, addr, context):
+    ip = addr[0]
+    # 1) Handshake mTLS DENTRO del hilo y con timeout (un cliente lento no bloquea el accept)
+    try:
+        raw_conn.settimeout(HANDSHAKE_TIMEOUT)
+        conn = context.wrap_socket(raw_conn, server_side=True)
+    except (ssl.SSLError, OSError) as e:
+        msg = f"Handshake mTLS RECHAZADO desde {ip}:{addr[1]}: {clean(e)}"
+        print(f"[!] {msg}")
+        logging.warning(msg)
+        raw_conn.close()
+        return
 
     try:
-        # Autenticación de capa de aplicación (Usuario y Contraseña)
-        # El certificado de cliente ya ha sido validado en el handshake (mTLS)
+        cipher_name, tls_version, key_bits = conn.cipher()
+        # 2) RS2: aceptar solo las suites exigidas (Python no permite fijarlas en TLS 1.3)
+        if cipher_name not in ALLOWED_CIPHERS:
+            logging.warning(f"Cipher no permitido ({cipher_name}) desde {ip}; conexión cerrada")
+            return
+
+        # 3) CN del certificado de cliente validado por la CA
+        subject = conn.getpeercert()["subject"]
+        cert_cn = next((v for rdn in subject for k, v in rdn if k == "commonName"), None)
+        logging.info(
+            f"Conexión TLS establecida desde {ip}:{addr[1]} | CN cert: {clean(cert_cn)} | "
+            f"Cipher: {cipher_name} | Versión: {tls_version} | Bits: {key_bits}"
+        )
+        print(f"[*] {ip} CN={cert_cn} cipher={cipher_name} ({tls_version}, {key_bits} bits)")
+
         auth_data = conn.recv(1024).decode('utf-8')
         if not auth_data:
             return
-
         try:
             credentials = json.loads(auth_data)
-            username = credentials.get('username')
-            password = credentials.get('password')
+            username = credentials['username']
+            password = credentials['password']
+            if not isinstance(username, str) or not isinstance(password, str):
+                raise ValueError
         except Exception:
             conn.sendall(b"ERROR: Formato de credenciales invalido.\n")
-            logging.warning(
-                f"Intento de conexión con formato de credenciales inválido "
-                f"desde {addr[0]}:{addr[1]}"
-            )
+            logging.warning(f"Credenciales con formato inválido desde {ip}")
             return
 
-        # Verificación segura: SQLite + HMAC-SHA256 + Salt (comparación en tiempo constante)
+        key = (ip, username)
+        if is_locked(key):
+            conn.sendall(b"ERROR: Cuenta bloqueada temporalmente.\n")
+            logging.warning(f"Intento sobre cuenta bloqueada '{clean(username)}' desde {ip}")
+            return
+
+        # 4) Ligar certificado <-> usuario: el CN del cert debe ser el usuario que hace login
         user_info = verify_user(username, password)
-
-        if user_info:
-            conn.sendall(b"OK: Autenticacion exitosa. Tunel VPN establecido.\n")
-            msg = (
-                f"Usuario '{username}' ({user_info['role']}) autenticado "
-                f"correctamente desde {addr[0]}."
+        if user_info and cert_cn != username:
+            logging.warning(
+                f"SUPLANTACIÓN: cert CN='{clean(cert_cn)}' intenta entrar como '{clean(username)}' desde {ip}"
             )
-            print(f"[*] {msg}")
-            logging.info(msg)
+            user_info = None
 
-            # Bucle principal de la VPN (recepción de datos)
-            while True:
-                data = conn.recv(4096)
-                if not data:
-                    break
-
-                command = data.decode('utf-8').strip()
-                if command == "LOGOUT":
-                    msg_logout = f"Usuario '{username}' ha cerrado la sesion explícitamente."
-                    print(f"[*] {msg_logout}")
-                    logging.info(msg_logout)
-                    conn.sendall(b"Sesion cerrada exitosamente. Desmontando tunel.\n")
-                    break
-
-                # Eco para demostración
-                response = f"Servidor recibio (Cifrado): {command}\n"
-                conn.sendall(response.encode('utf-8'))
-
-        else:
+        if not user_info:
+            register_fail(key)
             conn.sendall(b"ERROR: Credenciales invalidas.\n")
-            msg_fail = (
-                f"Intento de acceso fallido (Credenciales inválidas) "
-                f"para el usuario '{username}' desde {addr[0]}."
-            )
+            msg_fail = f"Acceso fallido para '{clean(username)}' (cert '{clean(cert_cn)}') desde {ip}"
             print(f"[!] {msg_fail}")
             logging.warning(msg_fail)
+            return
 
+        _fails.pop(key, None)
+        conn.sendall(b"OK: Autenticacion exitosa. Tunel VPN establecido.\n")
+        logging.info(f"Usuario '{clean(username)}' ({user_info['role']}) autenticado desde {ip}")
+
+        conn.settimeout(IDLE_TIMEOUT)
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            command = data.decode('utf-8').strip()
+            if command == "LOGOUT":
+                logging.info(f"Usuario '{clean(username)}' cerró la sesión explícitamente.")
+                conn.sendall(b"Sesion cerrada exitosamente. Desmontando tunel.\n")
+                break
+            conn.sendall(f"Servidor recibio (Cifrado): {command}\n".encode('utf-8'))
+
+    except socket.timeout:
+        logging.warning(f"Timeout de inactividad con {ip}")
     except ssl.SSLError as e:
-        msg_ssl = f"Error de Seguridad SSL/mTLS con {addr[0]}: {e}"
-        print(f"[!] {msg_ssl}")
-        logging.error(msg_ssl)
+        logging.error(f"Error SSL/mTLS con {ip}: {clean(e)}")
     except Exception as e:
-        msg_err = f"Error de conexión con {addr[0]}: {e}"
-        print(f"[!] {msg_err}")
-        logging.error(msg_err)
+        logging.error(f"Error de conexión con {ip}: {clean(e)}")
     finally:
-        logging.info(f"Cerrando conexión y desmontando túnel con {addr[0]}")
+        logging.info(f"Cerrando conexión y desmontando túnel con {ip}")
+        try:
+            conn.unwrap()       # envía close_notify (cierre TLS ordenado)
+        except Exception:
+            pass
         conn.close()
 
 def start_server():
@@ -143,19 +186,9 @@ def start_server():
     try:
         while True:
             client_sock, addr = server_socket.accept()
-            # Envolver el socket con SSL
-            try:
-                secure_sock = context.wrap_socket(client_sock, server_side=True)
-
-                # Crear un hilo por cada cliente (Modelo de concurrencia)
-                client_thread = threading.Thread(
-                    target=handle_client, args=(secure_sock, addr)
-                )
-                client_thread.daemon = True
-                client_thread.start()
-            except ssl.SSLError as e:
-                print(f"[!] Fallo en el handshake SSL (mTLS rechazado) desde {addr}: {e}")
-                client_sock.close()
+            threading.Thread(
+                target=handle_client, args=(client_sock, addr, context), daemon=True
+            ).start()
 
     except KeyboardInterrupt:
         print("\n[*] Apagando el servidor VPN...")
