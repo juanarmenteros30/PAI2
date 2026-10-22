@@ -4,6 +4,7 @@ import socket
 import ssl
 import json
 import os
+import queue
 import threading
 
 # Configuración por defecto
@@ -21,7 +22,11 @@ class VPNPortal(tk.Tk):
         self.secure_sock = None
         self.connected = False
         
+        # Los hilos de red NUNCA tocan Tk: encolan funciones que ejecuta el hilo principal
+        self._ui_queue = queue.Queue()
         self.create_widgets()
+        self.after(50, self._drain_ui_queue)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         
     def create_widgets(self):
         # Header
@@ -64,9 +69,21 @@ class VPNPortal(tk.Tk):
         self.send_btn = tk.Button(self.input_frame, text="Enviar", state=tk.DISABLED, command=self.send_message)
         self.send_btn.pack(side=tk.RIGHT)
         
+    def run_ui(self, fn, *args):
+        """Seguro desde cualquier hilo: ejecuta fn(*args) en el hilo principal de Tk."""
+        self._ui_queue.put((fn, args))
+
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                fn(*args)
+        except queue.Empty:
+            pass
+        self.after(50, self._drain_ui_queue)
+
     def log(self, message):
-        # Seguro para hilos: Tk solo se toca desde el hilo principal
-        self.after(0, self._log, message)
+        self.run_ui(self._log, message)
 
     def _log(self, message):
         self.log_area.config(state=tk.NORMAL)
@@ -80,7 +97,7 @@ class VPNPortal(tk.Tk):
             return
             
         username = self.user_entry.get().strip()
-        password = self.pass_entry.get().strip()
+        password = self.pass_entry.get()      # sin strip: la contraseña puede llevar espacios
         
         if not username or not password:
             messagebox.showerror("Error", "Por favor, introduce usuario y contraseña.")
@@ -99,43 +116,47 @@ class VPNPortal(tk.Tk):
         threading.Thread(target=self._connection_thread, args=(username, password, client_cert, client_key), daemon=True).start()
         
     def _connection_thread(self, username, password, client_cert, client_key):
+        sock = None
         try:
             context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_CERT)
             context.minimum_version = ssl.TLSVersion.TLSv1_3
             context.maximum_version = ssl.TLSVersion.TLSv1_3
             context.load_cert_chain(certfile=client_cert, keyfile=client_key)
-            
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.secure_sock = context.wrap_socket(client_socket, server_hostname=HOST)
-            self.secure_sock.connect((HOST, PORT))
-            
-            self.log(f"[*] Cifrado establecido: {self.secure_sock.cipher()[0]}")
+
+            raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw.settimeout(10)                      # conexión + handshake no se cuelgan
+            sock = context.wrap_socket(raw, server_hostname=HOST)
+            sock.connect((HOST, PORT))
+
+            self.log(f"[*] Cifrado establecido: {sock.cipher()[0]}")
             self.log(f"[*] Enviando credenciales para {username}...")
-            
-            credentials = {"username": username, "password": password}
-            self.secure_sock.sendall(json.dumps(credentials).encode('utf-8'))
-            
-            auth_response = self.secure_sock.recv(1024).decode('utf-8')
-            
-            if "OK" in auth_response:
+
+            sock.sendall(json.dumps({"username": username, "password": password}).encode('utf-8'))
+            auth_response = sock.recv(1024).decode('utf-8', errors='replace')
+
+            if auth_response.startswith("OK"):
+                sock.settimeout(None)
+                self.secure_sock = sock
                 self.connected = True
-                self.log("\n✅ TÚNEL VPN ESTABLECIDO CON ÉXITO")
-                self.after(0, self._update_ui_connected)
-                
-                # Iniciar hilo para recibir mensajes
-                threading.Thread(target=self._receive_thread, daemon=True).start()
+                self.log("\n[OK] TÚNEL VPN ESTABLECIDO CON ÉXITO")
+                self.run_ui(self._update_ui_connected)
+                threading.Thread(target=self._receive_thread, args=(sock,), daemon=True).start()
             else:
-                self.log(f"❌ Error de autenticación: {auth_response}")
-                self.secure_sock.close()
-                self.after(0, self._update_ui_disconnected)
-                
+                self.log(f"[X] Error de autenticación: {auth_response.strip()}")
+                sock.close()
+                self.run_ui(self._update_ui_disconnected)
+
         except ssl.SSLError as e:
-            self.log(f"❌ Error de seguridad mTLS: {e}")
-            self.after(0, self._update_ui_disconnected)
+            self.log(f"[X] Error de seguridad mTLS: {e}")
+            if sock:
+                sock.close()
+            self.run_ui(self._update_ui_disconnected)
         except Exception as e:
-            self.log(f"❌ Error de red: {e}")
-            self.after(0, self._update_ui_disconnected)
-            
+            self.log(f"[X] Error de red: {e}")
+            if sock:
+                sock.close()
+            self.run_ui(self._update_ui_disconnected)
+
     def _update_ui_connected(self):
         self.connect_btn.config(state=tk.NORMAL, text="Cerrar Sesión (LOGOUT)", bg="#d9534f")
         self.user_entry.config(state=tk.DISABLED)
@@ -149,23 +170,25 @@ class VPNPortal(tk.Tk):
         self.pass_entry.config(state=tk.NORMAL)
         self.msg_entry.config(state=tk.DISABLED)
         self.send_btn.config(state=tk.DISABLED)
-        self.connected = False
-        self.secure_sock = None
         
     def disconnect_vpn(self):
-        if not self.secure_sock:
-            self._update_ui_disconnected()
+        sock = self.secure_sock
+        if not sock:
+            self._finish_disconnect()
             return
         self.log("[*] Desmontando el túnel seguro y cerrando sesión...")
         self.connect_btn.config(state=tk.DISABLED)
         try:
             # El servidor responde y cierra; el hilo receptor detecta el EOF y termina el cierre
-            self.secure_sock.sendall(b"LOGOUT")
-            self.after(3000, self._finish_disconnect)      # salvaguarda
+            sock.sendall(b"LOGOUT")
+            self.after(3000, lambda: self._finish_disconnect(sock))   # salvaguarda
         except Exception:
-            self._finish_disconnect()
+            self._finish_disconnect(sock)
 
-    def _finish_disconnect(self):
+    def _finish_disconnect(self, expected=None):
+        """Cierra el socket y restaura la UI. `expected` evita cerrar una sesión posterior."""
+        if expected is not None and self.secure_sock is not expected:
+            return
         sock, self.secure_sock = self.secure_sock, None
         self.connected = False
         if sock:
@@ -175,19 +198,32 @@ class VPNPortal(tk.Tk):
                 pass
         self._update_ui_disconnected()
 
-    def _receive_thread(self):
+    def _receive_thread(self, sock):
         try:
-            while self.connected:
-                data = self.secure_sock.recv(1024)
+            while self.secure_sock is sock:
+                data = sock.recv(1024)
                 if not data:
                     break
-                self.log(f"[SERVER] {data.decode('utf-8').strip()}")
+                self.log(f"[SERVER] {data.decode('utf-8', errors='replace').strip()}")
         except Exception:
             pass
         finally:
-            if self.connected:
-                self.after(0, self._finish_disconnect)
-                
+            self.run_ui(self._finish_disconnect, sock)
+
+    def on_close(self):
+        """Al cerrar la ventana se cierra la sesión VPN de forma ordenada."""
+        sock = self.secure_sock
+        if sock:
+            try:
+                sock.sendall(b"LOGOUT")      # el servidor cierra su lado; luego cerramos el nuestro
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        self.destroy()
+
     def send_message(self):
         if not self.connected: return
         msg = self.msg_entry.get().strip()
@@ -199,8 +235,8 @@ class VPNPortal(tk.Tk):
         try:
             self.secure_sock.sendall(msg.encode('utf-8'))
         except Exception as e:
-            self.log(f"❌ Error al enviar: {e}")
-            self.disconnect_vpn()
+            self.log(f"[X] Error al enviar: {e}")
+            self._finish_disconnect()
 
 if __name__ == "__main__":
     app = VPNPortal()

@@ -1,10 +1,25 @@
 import os
+import sys
 import datetime
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
 from cryptography import x509
+
+def _write_private_key(path, private_key):
+    """Guarda la clave privada (PEM sin cifrar) con permisos 600 en sistemas POSIX."""
+    with open(path, "wb") as f:
+        f.write(private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
 
 def generate_private_key():
     return rsa.generate_private_key(
@@ -59,12 +74,7 @@ def generate_ca(output_dir):
         ), critical=True
     ).sign(private_key, hashes.SHA256())
     
-    with open(os.path.join(output_dir, "ca-key.pem"), "wb") as f:
-        f.write(private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
+    _write_private_key(os.path.join(output_dir, "ca-key.pem"), private_key)
         
     with open(os.path.join(output_dir, "ca-cert.pem"), "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
@@ -131,12 +141,7 @@ def generate_cert(output_dir, name, ca_key, ca_cert, is_server=False):
         
     cert = builder.sign(ca_key, hashes.SHA256())
     
-    with open(os.path.join(output_dir, f"{name}-key.pem"), "wb") as f:
-        f.write(private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
+    _write_private_key(os.path.join(output_dir, f"{name}-key.pem"), private_key)
         
     with open(os.path.join(output_dir, f"{name}-cert.pem"), "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
@@ -144,6 +149,13 @@ def generate_cert(output_dir, name, ca_key, ca_cert, is_server=False):
 if __name__ == "__main__":
     certs_dir = os.path.join(os.path.dirname(__file__), "certs")
     os.makedirs(certs_dir, exist_ok=True)
+
+    # Evita invalidar por accidente todos los certificados ya emitidos
+    if os.path.exists(os.path.join(certs_dir, "ca-cert.pem")) and "--force" not in sys.argv:
+        print(f"[!] Ya existe una PKI en {certs_dir}.")
+        print("    Regenerarla crea una CA nueva e INVALIDA todos los certificados emitidos.")
+        print("    Si es lo que quieres, ejecuta:  python pki/generate_pki.py --force")
+        sys.exit(1)
     
     print("Generando CA Corporativa...")
     ca_key, ca_cert = generate_ca(certs_dir)

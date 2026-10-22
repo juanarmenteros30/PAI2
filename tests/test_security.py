@@ -19,6 +19,16 @@ AUDIT = os.path.join(ROOT, 'server', 'audit.log')
 HOST, PORT = 'localhost', 8443
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'pki'))
+sys.path.insert(0, os.path.join(ROOT, 'server'))
+
+
+def ensure_environment():
+    """Deja listo el entorno: genera la PKI si no existe y crea los usuarios precargados."""
+    if not os.path.exists(os.path.join(CERTS, 'ca-cert.pem')):
+        subprocess.run([sys.executable, os.path.join(ROOT, 'pki', 'generate_pki.py')],
+                       check=True, stdout=subprocess.DEVNULL)
+    from seed_users import seed
+    seed()
 
 
 def make_ctx(cert=None, cafile=None, tls12=False):
@@ -59,6 +69,7 @@ def audit_text():
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        ensure_environment()
         # Si ya hay algo escuchando en 8443 (p. ej. un servidor viejo), los resultados no serían fiables
         try:
             socket.create_connection(('127.0.0.1', PORT), timeout=0.5).close()
@@ -176,6 +187,67 @@ class ServerTests(unittest.TestCase):
                 cli.close()
                 srv.close()
 
+    def test_08_registro_de_usuario_emite_certificado_y_permite_login(self):
+        import register_user
+        from db import delete_user, user_exists
+        name = 'tmp_reg_user'
+        files = [os.path.join(CERTS, f'{name}-cert.pem'), os.path.join(CERTS, f'{name}-key.pem')]
+        try:
+            register_user.register(name, 'Clave_segura_1', 'PDI')
+            self.assertTrue(all(os.path.exists(f) for f in files))
+            self.assertTrue(login(name, name, 'Clave_segura_1').startswith('OK'))
+            self.assertTrue(login('pas_user', name, 'Clave_segura_1').startswith('ERROR'))   # cert ajeno
+            with self.assertRaises(ValueError):                                             # duplicado
+                register_user.register(name, 'Clave_segura_1', 'PDI')
+        finally:
+            delete_user(name)
+            for f in files:
+                if os.path.exists(f):
+                    os.remove(f)
+        self.assertFalse(user_exists(name))
+
+    def test_08b_registro_rechaza_datos_invalidos(self):
+        import register_user
+        from db import user_exists
+        for bad_user in ('ca', 'server', '../x', 'AB', 'con espacio', 'a' * 40, ''):
+            with self.assertRaises(ValueError, msg=bad_user):
+                register_user.register(bad_user, 'Clave_segura_1', 'PDI')
+        with self.assertRaises(ValueError):
+            register_user.register('usuario_ok', 'corta', 'PDI')            # contraseña corta
+        with self.assertRaises(ValueError):
+            register_user.register('usuario_ok', 'Clave_segura_1', '  ')    # rol vacío
+        self.assertFalse(user_exists('usuario_ok'))
+        self.assertFalse(os.path.exists(os.path.join(CERTS, 'ca-cert.pem.bak')))
+
+    @unittest.skipUnless(os.environ.get('PAI2_GUI_TEST') == '1', 'GUI: define PAI2_GUI_TEST=1 para probarla')
+    def test_09_gui_login_mensaje_y_logout(self):
+        sys.path.insert(0, os.path.join(ROOT, 'client'))
+        import gui_portal
+        app = gui_portal.VPNPortal()
+
+        def pump(cond, timeout=8):
+            end = time.time() + timeout
+            while time.time() < end:
+                app.update()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return False
+        try:
+            app.user_entry.insert(0, 'pdi_user')
+            app.pass_entry.insert(0, 'pdi_password123')
+            app.connect_vpn()
+            self.assertTrue(pump(lambda: app.connected and str(app.msg_entry['state']) == 'normal'),
+                            "la GUI no llegó a conectar")
+            app.msg_entry.insert(0, 'hola')
+            app.send_message()
+            self.assertTrue(pump(lambda: 'Servidor recibio' in app.log_area.get('1.0', 'end')))
+            app.disconnect_vpn()
+            self.assertTrue(pump(lambda: not app.connected and app.secure_sock is None), "no cerró la sesión")
+            self.assertEqual(str(app.connect_btn['state']), 'normal')
+        finally:
+            app.destroy()
+
     def test_99_bloqueo_tras_intentos_fallidos(self):   # último: bloquea a inv_user durante 60 s
         for _ in range(5):
             login('inv_user', 'inv_user', 'mala')
@@ -185,6 +257,10 @@ class ServerTests(unittest.TestCase):
 
 
 class DbTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ensure_environment()
+
     def test_hash_no_reversible_y_verificacion(self):
         sys.path.insert(0, os.path.join(ROOT, 'server'))
         import sqlite3
@@ -196,6 +272,9 @@ class DbTests(unittest.TestCase):
         self.assertIsNotNone(db.verify_user('pdi_user', 'pdi_password123'))
         self.assertIsNone(db.verify_user('pdi_user', 'otra'))
         self.assertIsNone(db.verify_user("x' OR '1'='1", 'x'))
+        self.assertIsNone(db.verify_user('no_existe', 'x'))
+        self.assertIsNone(db.verify_user(None, 'x'))
+        self.assertIsNone(db.verify_user('pdi_user', None))
 
 
 if __name__ == '__main__':

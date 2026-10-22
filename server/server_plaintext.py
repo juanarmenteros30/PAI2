@@ -23,7 +23,7 @@ def handle_client(conn, addr):
             conn.sendall(b"ERROR\n")
             return
             
-        if verify_user(username, password):
+        if isinstance(username, str) and isinstance(password, str) and verify_user(username, password):
             conn.sendall(b"OK\n")
             while True:
                 data = conn.recv(4096)
@@ -34,7 +34,7 @@ def handle_client(conn, addr):
                 conn.sendall(b"ACK\n")
         else:
             conn.sendall(b"ERROR\n")
-    except Exception as e:
+    except Exception:
         pass
     finally:
         conn.close()
@@ -42,7 +42,10 @@ def handle_client(conn, addr):
 def start_server():
     init_db()
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen(350)
     

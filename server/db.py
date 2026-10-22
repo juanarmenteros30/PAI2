@@ -3,25 +3,37 @@ db.py — Gestión de la base de datos de usuarios (SQLite + PBKDF2-HMAC-SHA256 
 
 Esquema de seguridad:
   - Cada usuario tiene un salt aleatorio de 32 bytes (os.urandom).
-  - La contraseña se almacena como PBKDF2-HMAC-SHA256 (salt, 200.000 iteraciones) en hex.
-  - Nunca se guarda la contraseña en claro.
+  - La contraseña se almacena derivada con PBKDF2-HMAC-SHA256 (salt, KDF_ITERATIONS
+    iteraciones) en hex. Nunca se guarda la contraseña en claro.
+  - La columna se llama `password_hmac` por compatibilidad con la BD ya creada;
+    contiene la clave derivada con PBKDF2.
+  - La verificación gasta el mismo tiempo exista o no el usuario (evita enumerar usuarios).
 """
 
-import sqlite3
-import hmac
 import hashlib
+import hmac
 import os
+import sqlite3
+from contextlib import contextmanager
 
 KDF_ITERATIONS = 200_000
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'users.db')
 
+# Salt falso para igualar tiempos cuando el usuario no existe
+_DUMMY_SALT = os.urandom(32).hex()
 
-def _get_connection() -> sqlite3.Connection:
-    """Devuelve una conexión a la base de datos SQLite."""
-    conn = sqlite3.connect(DB_PATH)
+
+@contextmanager
+def _get_connection():
+    """Conexión SQLite que hace commit/rollback y SIEMPRE se cierra al salir."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -35,25 +47,12 @@ def init_db() -> None:
                 role     TEXT NOT NULL
             )
         """)
-        conn.commit()
 
 
 def _compute_hmac(salt_hex: str, password: str) -> str:
     """
     Deriva la clave de la contraseña con PBKDF2-HMAC-SHA256 (KDF lento) usando
-    el salt (en hex) y KDF_ITERATIONS iteraciones.
-
-    Parámetros
-    ----------
-    salt_hex : str
-        Salt de 32 bytes representado como cadena hexadecimal (64 chars).
-    password : str
-        Contraseña en claro proporcionada por el usuario.
-
-    Retorna
-    -------
-    str
-        Digest HMAC-SHA256 en formato hexadecimal.
+    el salt (en hex) y KDF_ITERATIONS iteraciones. Devuelve el resultado en hex.
     """
     return hashlib.pbkdf2_hmac(
         'sha256', password.encode('utf-8'), bytes.fromhex(salt_hex), KDF_ITERATIONS
@@ -62,57 +61,35 @@ def _compute_hmac(salt_hex: str, password: str) -> str:
 
 def add_user(username: str, password: str, role: str) -> None:
     """
-    Registra un nuevo usuario en la base de datos.
+    Registra un nuevo usuario. Genera un salt criptográficamente seguro
+    (os.urandom(32)) y guarda la clave derivada, nunca la contraseña en claro.
 
-    Genera un salt criptográficamente seguro (os.urandom(32)) y almacena
-    el HMAC-SHA256 de la contraseña —nunca la contraseña en claro—.
-
-    Parámetros
-    ----------
-    username : str
-        Nombre de usuario único.
-    password : str
-        Contraseña en claro (se descarta tras calcular el HMAC).
-    role : str
-        Rol del usuario (PDI, PAS, Investigadores, etc.).
-
-    Lanza
-    -----
-    ValueError
-        Si el usuario ya existe en la base de datos.
+    Lanza ValueError si el usuario ya existe.
     """
     salt_hex = os.urandom(32).hex()          # 32 bytes → 64 chars hex
-    password_hmac = _compute_hmac(salt_hex, password)
+    derived = _compute_hmac(salt_hex, password)
 
-    with _get_connection() as conn:
-        try:
+    try:
+        with _get_connection() as conn:
             conn.execute(
                 "INSERT INTO users (username, salt, password_hmac, role) VALUES (?, ?, ?, ?)",
-                (username, salt_hex, password_hmac, role)
+                (username, salt_hex, derived, role)
             )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            raise ValueError(f"El usuario '{username}' ya existe en la base de datos.")
+    except sqlite3.IntegrityError:
+        raise ValueError(f"El usuario '{username}' ya existe en la base de datos.")
 
 
 def verify_user(username: str, password: str) -> dict | None:
     """
-    Verifica las credenciales de un usuario de forma segura (comparación
-    en tiempo constante mediante hmac.compare_digest).
+    Verifica las credenciales (comparación en tiempo constante con
+    hmac.compare_digest). Devuelve {'username', 'role'} o None.
 
-    Parámetros
-    ----------
-    username : str
-        Nombre de usuario.
-    password : str
-        Contraseña en claro a verificar.
-
-    Retorna
-    -------
-    dict | None
-        Diccionario con las claves 'username' y 'role' si las credenciales
-        son correctas; None en caso contrario.
+    Si el usuario no existe también se ejecuta el KDF con un salt falso, para que
+    el tiempo de respuesta no revele qué usuarios existen.
     """
+    if not isinstance(username, str) or not isinstance(password, str):
+        return None
+
     with _get_connection() as conn:
         row = conn.execute(
             "SELECT salt, password_hmac, role FROM users WHERE username = ?",
@@ -120,12 +97,11 @@ def verify_user(username: str, password: str) -> dict | None:
         ).fetchone()
 
     if row is None:
+        _compute_hmac(_DUMMY_SALT, password)
         return None
 
-    expected_hmac = _compute_hmac(row['salt'], password)
-
-    # Comparación en tiempo constante para evitar ataques de timing
-    if hmac.compare_digest(expected_hmac, row['password_hmac']):
+    expected = _compute_hmac(row['salt'], password)
+    if hmac.compare_digest(expected, row['password_hmac']):
         return {'username': username, 'role': row['role']}
     return None
 
@@ -143,4 +119,3 @@ def delete_user(username: str) -> None:
     """Elimina un usuario (rollback del registro si falla la emisión del certificado)."""
     with _get_connection() as conn:
         conn.execute("DELETE FROM users WHERE username = ?", (username,))
-        conn.commit()

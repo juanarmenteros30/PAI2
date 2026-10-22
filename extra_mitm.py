@@ -51,7 +51,13 @@ def start_mitm():
             print(f"\n[!] Nueva víctima conectada desde {addr}")
             
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_sock.connect((TARGET_HOST, TARGET_PORT))
+            try:
+                server_sock.connect((TARGET_HOST, TARGET_PORT))
+            except OSError as e:
+                print(f"[!] No se pudo conectar con el servidor real ({TARGET_HOST}:{TARGET_PORT}): {e}")
+                client_sock.close()
+                server_sock.close()
+                continue
             
             # Hilos para reenviar en ambas direcciones
             threading.Thread(target=forward, args=(client_sock, server_sock, "Cliente -> Servidor"), daemon=True).start()
