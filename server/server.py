@@ -50,7 +50,8 @@ def register_fail(key):
 logging.basicConfig(
     filename=AUDIT_LOG,
     level=logging.INFO,
-    format='%(asctime)s - AUDIT - %(levelname)s - %(message)s'
+    format='%(asctime)s - AUDIT - %(levelname)s - %(message)s',
+    encoding='utf-8'
 )
 
 def handle_client(raw_conn, addr, context):

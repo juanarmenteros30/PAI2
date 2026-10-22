@@ -49,28 +49,57 @@ def login(cert, user, pwd):
 
 
 def audit_text():
-    with open(AUDIT, encoding='utf-8', errors='replace') as f:
-        return f.read()
+    try:
+        with open(AUDIT, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except FileNotFoundError:
+        return ''
 
 
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Si ya hay algo escuchando en 8443 (p. ej. un servidor viejo), los resultados no serían fiables
+        try:
+            socket.create_connection(('127.0.0.1', PORT), timeout=0.5).close()
+        except OSError:
+            pass
+        else:
+            raise RuntimeError("Ya hay un proceso escuchando en el puerto 8443. "
+                               "Cierra el servidor que tengas abierto y repite.")
+        cls.audit_start = len(audit_text())
+        cls.out = tempfile.TemporaryFile()
+        env = dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
         cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server', 'server.py')],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(50):
+                                    stdout=cls.out, stderr=subprocess.STDOUT, env=env, cwd=ROOT)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if cls.proc.poll() is not None:
+                raise RuntimeError(f"El servidor terminó al arrancar (código {cls.proc.returncode}):\n{cls._server_output()}")
             try:
-                socket.create_connection((HOST, PORT), timeout=0.2).close()
-                break
+                socket.create_connection(('127.0.0.1', PORT), timeout=0.5).close()
+                return
             except OSError:
                 time.sleep(0.2)
-        else:
-            raise RuntimeError("El servidor no arrancó")
+        cls.proc.terminate()
+        raise RuntimeError(f"El servidor no escucha tras 15 s. Salida:\n{cls._server_output()}")
+
+    @classmethod
+    def _server_output(cls):
+        cls.out.seek(0)
+        return cls.out.read().decode('utf-8', errors='replace')
+
+    def audit_new(self):
+        """Texto del audit log escrito desde que arrancó este servidor."""
+        return audit_text()[self.audit_start:]
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.wait(5)
+        if getattr(cls, 'proc', None) and cls.proc.poll() is None:
+            cls.proc.terminate()
+            cls.proc.wait(5)
+        if getattr(cls, 'out', None):
+            cls.out.close()
 
     def test_01_login_legitimo_tls13_aead(self):
         s = connect('pdi_user')
@@ -88,7 +117,7 @@ class ServerTests(unittest.TestCase):
     def test_03_certificado_de_otro_usuario_es_suplantacion(self):
         self.assertTrue(login('pas_user', 'pdi_user', 'pdi_password123').startswith('ERROR'))
         time.sleep(0.2)
-        self.assertIn("SUPLANTACIÓN: cert CN='pas_user' intenta entrar como 'pdi_user'", audit_text())
+        self.assertIn("SUPLANTACIÓN: cert CN='pas_user' intenta entrar como 'pdi_user'", self.audit_new())
 
     def test_04_cliente_sin_certificado_rechazado_y_auditado(self):
         s = None
@@ -102,7 +131,7 @@ class ServerTests(unittest.TestCase):
             if s:
                 s.close()
         time.sleep(0.3)
-        self.assertIn('Handshake mTLS RECHAZADO', audit_text())
+        self.assertIn('Handshake mTLS RECHAZADO', self.audit_new())
 
     def test_05_tls12_rechazado(self):
         s = make_ctx('pdi_user', tls12=True).wrap_socket(socket.socket(), server_hostname=HOST)
@@ -152,7 +181,7 @@ class ServerTests(unittest.TestCase):
             login('inv_user', 'inv_user', 'mala')
         self.assertIn('bloqueada', login('inv_user', 'inv_user', 'inv_password123'))
         time.sleep(0.2)
-        self.assertIn('cuenta bloqueada', audit_text().lower())
+        self.assertIn('cuenta bloqueada', self.audit_new().lower())
 
 
 class DbTests(unittest.TestCase):
