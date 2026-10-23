@@ -9,6 +9,7 @@ Esquema de seguridad:
     contiene la clave derivada con PBKDF2.
   - La verificación gasta el mismo tiempo exista o no el usuario (evita enumerar usuarios).
 """
+from __future__ import annotations
 
 import hashlib
 import hmac
