@@ -3,3 +3,5 @@ __pycache__/
 server/users.json
 server/users.json.migrated
 server/audit.log
+server/users.db
+pki/certs/
