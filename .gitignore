@@ -5,3 +5,5 @@ server/users.json.migrated
 server/audit.log
 server/users.db
 pki/certs/
+client/benchmark_tls.csv
+client/benchmark_plaintext.csv
