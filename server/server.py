@@ -11,6 +11,7 @@ import time
 # Añadir directorio padre al path para importar db
 sys.path.insert(0, os.path.dirname(__file__))
 from db import init_db, verify_user
+from registration_server import start_registration_server
 
 # Configuración del servidor
 HOST = '0.0.0.0'
@@ -185,6 +186,9 @@ def start_server():
     # Inicializar base de datos SQLite (crea la tabla si no existe)
     init_db()
     print("[*] Base de datos SQLite de usuarios inicializada.")
+
+    # Arrancar el servidor de auto-registro en un hilo daemon (puerto 8444, TLS sin mTLS)
+    threading.Thread(target=start_registration_server, daemon=True, name="reg-server").start()
 
     # Configuración del contexto SSL para TLS 1.3 y mTLS
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
