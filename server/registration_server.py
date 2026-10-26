@@ -34,7 +34,7 @@ from register_user import register          # valida + BD + genera cert
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 REG_HOST     = '0.0.0.0'
-REG_PORT     = 8444
+REG_PORT     = 8446
 CERTS_DIR    = os.path.join(os.path.dirname(__file__), '..', 'pki', 'certs')
 SERVER_CERT  = os.path.join(CERTS_DIR, 'server-cert.pem')
 SERVER_KEY   = os.path.join(CERTS_DIR, 'server-key.pem')

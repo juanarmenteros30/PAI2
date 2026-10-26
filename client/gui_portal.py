@@ -11,7 +11,7 @@ from datetime import datetime
 # Configuración por defecto
 HOST      = 'localhost'
 PORT      = 8443
-REG_PORT  = 8444          # Puerto del servidor de auto-registro (TLS sin mTLS)
+REG_PORT  = 8446          # Puerto del servidor de auto-registro (TLS sin mTLS)
 CERTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'pki', 'certs')
 CA_CERT   = os.path.join(CERTS_DIR, 'ca-cert.pem')
 
@@ -585,6 +585,7 @@ class VPNPortal(tk.Tk):
                 text = data.decode('utf-8', errors='replace').strip()
                 if text:
                     self.chat_server(text)
+                    self.log(f"[SERVER] {text}")
         except Exception:
             pass
         finally:
